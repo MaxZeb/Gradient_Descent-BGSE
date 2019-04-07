@@ -1,0 +1,278 @@
+---
+title: "Continuous optimization: Descent Methods"
+author: "Maximilian Zebhauser"
+date: "12 11 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(numDeriv)
+library(tidyverse)
+require(knitr)
+require(Matrix)
+require(MASS)
+require(gridExtra)
+require(cowplot)
+```
+
+```{r eval_func, include=FALSE}
+eval_func <- function(x_start, A, m){
+    # Calculate gradient
+    out_grad_desc <- gradient_descent(x_start, A, m)
+    out_grad_desc <- data.frame(matrix(unlist(out_grad_desc), 
+                                       nrow=length(out_grad_desc), byrow=T))
+    # Calculate Newton
+    out_newt_desc <- newton_descent(x_start, A, m)
+    out_newt_desc <- data.frame(matrix(unlist(out_newt_desc), 
+                                       nrow=length(out_newt_desc), byrow=T))
+    # Calculate coodinate
+    out_coor_desc <- coord_descent(x_start, A, m)
+    out_coor_desc <- data.frame(matrix(unlist(out_coor_desc), 
+                                       nrow=length(out_coor_desc), byrow=T))
+    vectmat <- expand.grid(seq(-5,5,len = 50), seq(-5,5,len = 50))
+    vectmat["f_x"] <- apply(vectmat,1, function(x) given_function(c(x[1],x[2]),A,m))
+    list("grad"=out_grad_desc, "newt"=out_newt_desc, "coor"=out_coor_desc, 
+         "vect"=vectmat)
+}
+plot_func <- function(descents, tit = "Example paths"){
+    ggplot() + 
+    geom_contour(data =descents[[4]], aes(Var1, Var2, z = f_x),bins = 20, col="grey") +
+    geom_path(data=descents[[1]],aes(x=X1,y=X2), col="yellow") +
+    geom_point(data=descents[[1]],aes(x=X1,y=X2), col="yellow") +
+    geom_path(data=descents[[3]],aes(x=X1,y=X2), col="blue") +
+    geom_point(data=descents[[3]],aes(x=X1,y=X2), col="blue") +
+    geom_path(data=descents[[2]],aes(x=X1,y=X2), col="red") +
+    geom_point(data=descents[[2]],aes(x=X1,y=X2), col="red") + ylim(c(-5,-.5)) +
+    xlim(c(.5,5)) + theme(axis.line = element_line(colour = "black"),
+                           panel.grid.major = element_blank(),
+                           panel.grid.minor = element_blank(),
+                           panel.border = element_blank(),
+                           panel.background = element_blank(),
+                           axis.title.x=element_blank(),
+                           axis.text.x=element_blank(),
+                           axis.ticks.x=element_blank(),
+                           axis.title.y=element_blank(),
+                           axis.text.y=element_blank(),
+                           axis.ticks.y=element_blank(),
+                           axis.line.y=element_blank(),
+                           axis.line.x=element_blank()) + 
+    ggtitle(tit) 
+}
+plot_legend <- function(descents){
+    vectmat <- expand.grid(seq(-5,5,len = 50), seq(-5,5,len = 50))
+    vectmat["f_x"] <- apply(vectmat,1, function(x) given_function(c(x[1],x[2]),A,m))
+    ploto <- ggplot() + 
+        geom_contour(data =vectmat, aes(Var1, Var2, z = f_x),bins = 50, col="darkgrey") +
+        geom_path(data=descents[[1]],aes(x=X1,y=X2, col="Gradient Descent")) +
+        #geom_point(data=descents[[1]],aes(x=X1,y=X2, col="Gradient")) +
+        geom_path(data=descents[[3]],aes(x=X1,y=X2, col="Coordinate Descent")) +
+        #geom_point(data=descents[[3]],aes(x=X1,y=X2, col="Coordinate")) +
+        geom_path(data=descents[[2]],aes(x=X1,y=X2, col="Newton's Method")) +
+        #geom_point(data=descents[[2]],aes(x=X1,y=X2, col="Newton")) + ylim(c(-5,5)) +
+        xlim(c(-5,5)) + theme(axis.line = element_line(colour = "black"),
+                               panel.grid.major = element_blank(),
+                               panel.grid.minor = element_blank(),
+                               panel.border = element_blank(),
+                               panel.background = element_blank(),
+                               axis.title.x=element_blank(),
+                               axis.text.x=element_blank(),
+                               axis.ticks.x=element_blank(),
+                               axis.title.y=element_blank(),
+                               axis.text.y=element_blank(),
+                               axis.ticks.y=element_blank(),
+                               axis.line.y=element_blank(),
+                               axis.line.x=element_blank()) + 
+        scale_colour_manual("", values = c("Gradient Descent"="yellow", 
+                                           "Coordinate Descent"="blue", 
+                                           "Newton's Method"="red"))
+    get_legend(ploto)
+}
+
+```
+
+Given is the following funciton with $\boldsymbol { x } \in \mathbb { R } ^ { n }$, $\boldsymbol { m } \in \mathbb { R } ^ { n }$ as a fixed vector and $A \in \mathbb { S } _ { + + } ^ { n }$ as a fixed positive definite matrix:
+
+$$
+f ( x ) = \frac { 1 } { 2 } ( x - m ) ^ { \top } A ( x - m ) - \sum _ { i = 1 } ^ { n } \log \left( x _ { i } ^ { 2 } \right)
+$$
+
+## Implementations
+Function:
+
+```{r function}
+given_function <- function(x,A,m) (0.5 * t((x - m)) %*% A %*% (x - m) - sum(log(x^2)))
+given_gradient <- function(x,A,m) A %*% (x - m) - 2/(x)
+given_hessian <- function(x,A,m) A + diag(diag( 2 / (x %*% t(x))))
+```
+
+Gradient descent function:
+
+```{r gradient descent}
+gradient_descent <- function(x_start, A, m, precis = 0.01, iter = 10000){
+    i <- 1; step_length <- precis + 1; step_size <- 1
+    trace <- list(list("x" = x_start, "f_x" = given_function(x_start,A,m)))
+    while (precis < step_length) {
+        gradient <- given_gradient(trace[[i]][["x"]],A,m)
+        x_next <- trace[[i]][["x"]] - step_size * gradient
+        step_length <- sqrt(sum(gradient^2))
+        i = i + 1
+        trace[i] <- list(list("x" = x_next,"f_x" = given_function(x_next,A,m)))
+        if (trace[[i-1]][["f_x"]] < trace[[i]][["f_x"]]){
+            i = i - 1
+            step_size <- step_size/2
+        }
+        if (i == iter) break
+    }
+    trace
+}
+```
+
+Coordinate descent function, as proposed by Stephen J. Wright (https://arxiv.org/pdf/1502.04759.pdf):
+
+```{r coordinatewise descent}
+coord_descent <- function(x_start, A, m, precis = 0.01, iter = 10000){
+    i <- 1; step_length <- precis + 1; step_size <- 1
+    trace <- list(list("x" = x_start, "f_x" = given_function(x_start,A,m)))
+    space <- length(trace[[i]][["x"]])
+    k <- rep(1:space,iter/space)
+    while (precis < step_length) {
+        gradient <- given_gradient(trace[[i]][["x"]],A,m)
+        basis_vector <- rep(0,space)
+        basis_vector[k[i]] <- gradient[k[i]]
+        x_next <- trace[[i]][["x"]] - step_size * basis_vector
+        step_length <- sqrt(sum(gradient^2))
+        i = i + 1
+        trace[i] <- list(list("x" = x_next,"f_x" = given_function(x_next,A,m)))
+        if (trace[[i-1]][["f_x"]] < trace[[i]][["f_x"]]){
+            i = i - 1
+            step_size <- step_size/2
+        }
+        if (i == iter) break
+    }
+    trace
+}
+```
+
+Newton's method:
+
+```{r newton descent}
+newton_descent <- function(x_start, A, m, precis = 0.01, iter = 10000){
+    i <- 1; step_length <- precis + 1; step_size <- 1
+    trace <- list(list("x" = x_start, "f_x" = given_function(x_start,A,m)))
+    while (precis < step_length) {
+        gradient <- given_gradient(trace[[i]][["x"]],A,m)
+        hessian <- given_hessian(trace[[i]][["x"]], A, m)
+        x_next <- trace[[i]][["x"]] - step_size * (solve(hessian) %*% gradient)
+        step_length <- sqrt(sum(gradient^2))
+        i = i + 1
+        trace[i] <- list(list("x" = x_next,"f_x" = given_function(x_next,A,m)))
+        if (trace[[i-1]][["f_x"]] < trace[[i]][["f_x"]]){
+            i = i - 1
+            step_size <- step_size/2
+        }
+        if (i == iter) break
+    }
+    trace
+}
+```
+
+
+## Convergence with variation in A for the two-dimensional case
+$\mathfrak { m } = ( 0.5,0 )$ and $A = \left[ \begin{array} { l l } { 1 } & { \rho } \\ { \rho } & { 1 } \end{array} \right]$ where $\rho \in ( - 1,1 )$.
+
+Having $\rho = |1|$ means, that one of the eigenvalues is 0 and A is positive semi-definite. This indicates that the function has a linear subspace rather than a minimum. This special case is excluded from any further investigation. All three approaches use the basic backtracking method and have the same precision threshold. To compare the performance of the three methods I will compare the number of iterations needed. I will average the number of iterations needed for 100 different random starting points. Starting points will be constant and only $\rho$ will be varyied. The outcomes of the analysis is seen in Table 1.
+
+The Newton Method requires on average between 6 to 7 iterations no matter what values the matrix A consists of. It is the most stable approach and has the best performance for all cases. In the cases, where the function is less elipsoid shaped (lower ratio of the two eigenvalues) the gradient descent method performs better than the coordinate-wise descent. It is clear that in the extreme cases the gradient descent method struggles. 
+
+\pagebreak
+
+```{r table 2d,echo=F}
+A <- matrix(c(1,0,0,1),ncol = 2,nrow=2,byrow=T)
+m <- c(0.5,0)
+rho <- seq(from = -.9, to = .9, by = .3)
+set.seed(66)
+x_start <- matrix(sample(c(seq(-10,-.1,by = .1),seq(.1,10,by = .1)), 200, replace=T),ncol=2)
+results <- list()
+i <- 1
+for (r in rho){
+    A[1,2] <- r; A[2,1] <- r
+    out_grad_desc <- mean(sapply(apply(x_start,1, gradient_descent, A=A, m=m),length))
+    out_newt_desc <- mean(sapply(apply(x_start,1, newton_descent, A=A, m=m),length))
+    out_coor_desc <- mean(sapply(apply(x_start,1, coord_descent, A=A, m=m),length))
+    results[i] <- list(list(r,out_grad_desc,out_coor_desc,out_newt_desc,
+                            (max(eigen(A)$values)/min(eigen(A)$values))))
+    i = i + 1
+}
+results <- data.frame(matrix(unlist(results), nrow=length(results), byrow=T))
+results <- round(results,2)
+kable(results, col.names = c("Rho","Gradient Descent","Coordinate Descent",
+                             "Newton's Method","Eigenvalue ratio"), 
+      align = "c", caption = "Performance as average number of iterations")
+```
+
+
+## Graphical analysis of the two-dimensional case
+Let's have a look at three cases graphically. First I want to explore the case where the gradient descent method performs well (e.g. $\rho = 0$).  Then I explore two cases where the function is more elipsoid shaped (e.g. $\rho = 0.7$ and $\rho = 0.9$). For the graphical analysis the start values are picked manually. This allows to "zoom in" and we can focus the analysis on one quadrant. This is done with no loss of generality, as the function behaves almost the same as $\rho = 0$ in the two quadrants I and III while varying positive $\rho$. The shape changes in the II and IV quandrant mirrowed around the origin. The behaviour is vice versa regarding the quadrants for negative $\rho$. To observe the convergence of the different methods in a higher detail, I will focus on the IV quadrant and therefore pick a start value in this quadrant: $x = ( 4.5,-1 )$.
+
+```{r plotting,warning=F,echo=F}
+# Set rhos 
+rho <- c(0,.7,.9)
+# Set vector m
+m <- c(0.5,0)
+# Calculation
+x_start <- c(4.5,-1)
+i <- 1
+descents <- list()
+for (r in rho){
+    A <- matrix(c(1,0,0,1),ncol = 2,nrow=2,byrow=T)
+    A[1,2] <- r; A[2,1] <- r
+    descents[i] <- list(eval_func(x_start, m = m, A = A))
+    i <- i + 1
+}
+# Plot
+grid.arrange(plot_func(descents[[1]], "Rho = 0"), plot_func(descents[[2]], "Rho = 0.7"), plot_func(descents[[3]], "Rho = 0.9"), plot_legend(descents[[1]]), nrow=2, ncol=2)
+```
+
+All methods show a path as expected. The gradient decent heads always in the direction of the gradient solely and in these special cases converges for increasing $\rho$ within the following number of iterations: `r nrow(descents[[1]][["grad"]])`, `r nrow(descents[[2]][["grad"]])` and `r nrow(descents[[3]][["grad"]])`. The coordinate-wise descent is always heading in direction of the partial derivative and shows a zig-zag path when converging to the minimum. It performs simliar as the gradient descent, but has lower number of iterations when the functions is more elipsoid shaped: `r nrow(descents[[1]][["coor"]])`, `r nrow(descents[[2]][["coor"]])` and `r nrow(descents[[3]][["coor"]])`. The Newton method performs best with respect to number of iterations and finds its path by taking the the gradient and the hessian into account. This means compared to the gradient descent method it respects the curvature of the function. Following iterations needed for the seen three cases: `r nrow(descents[[1]][["newt"]])`, `r nrow(descents[[2]][["newt"]])` and `r nrow(descents[[3]][["newt"]])`.
+
+
+## Higher dimensional cases
+In this step I will compare how the methods perform if a higher the number of dimensions is observed, e.g. $\mathbb { R } ^ { n }$ with $n \in [100, 1000]$. This time I average over 25 random starting points for computational reasons. Matrix A and vector m are randomly simulated, which is also true for the starting points. The results are seen in Table 2 and Table 3 below.
+
+```{r table nd,echo=F}
+# Set seed and the steps of higher dimensions
+i <- 1
+set.seed(11)
+iterations <- list()
+running_time <- list()
+# Generate A
+A <- matrix(rnorm(1000*1000,0,.1), ncol = 1000)
+A <- A %*% t(A)
+# Generate m
+m <- sample(seq(.1,10,by = .5),1000,rep=TRUE)
+# Generate starting x
+x_start <- matrix(sample(c(seq(-10,-.1,by = .1),seq(.1,10,by = .1)), 1000 * 25, replace=T),ncol=1000)
+Rn <- c(50, 250, 500, 750, 1000)
+for (n in Rn){
+    time_grad <- unname(system.time(out_grad_desc <- mean(sapply(apply(x_start[,1:n],1, gradient_descent, A=A[1:n,1:n],m= m[1:n]),length)))[3])
+    time_newt <- unname(system.time(out_newt_desc <- mean(sapply(apply(x_start[,1:n],1, newton_descent, A=A[1:n,1:n], m= m[1:n]),length)))[3])
+    time_coor <- unname(system.time(out_coor_desc <- mean(sapply(apply(x_start[,1:n],1, coord_descent, A=A[1:n,1:n], m= m[1:n]),length)))[3])
+    iterations[i] <- list(list(n, out_grad_desc, out_coor_desc, out_newt_desc))
+    running_time[i] <- list(list(n, time_grad, time_coor, time_newt))
+    i = i + 1
+}
+iterations <- data.frame(matrix(unlist(iterations), nrow=length(iterations), byrow=T))
+iterations <- round(iterations,2)
+kable(iterations, col.names = c("Dimension","Gradient Descent","Coordinate Descent",
+                             "Newton's Method"), 
+      align = "c", caption = "Performance as average number of iterations") 
+running_time <- data.frame(matrix(unlist(running_time), nrow=length(running_time), byrow=T))
+running_time <- round(running_time,2)
+kable(running_time, col.names = c("Dimension","Gradient Descent","Coordinate Descent",
+                             "Newton's Method"), 
+      align = "c", caption = "Performance as running time") 
+```
+
+In higher dimensions the coordinate descent method doesn't converge within the iteration threshold. This also the reason for the high running time. The convergence performance of the gradient descent method gets worse with increasing number of dimensions, but within the given range of dimensions the method converges. The Newton's method is by far the most performant method considering the number of iterations. When it comes to running time the Newton's method only slightly outperforms the gradient descent method. The reason for this are the two additional calculation steps, e.g. the calculation of the hessian and the calculation of the inverse of the hessian. 
+
+
